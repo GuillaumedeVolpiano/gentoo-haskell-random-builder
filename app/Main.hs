@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds             #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -16,36 +17,26 @@
 -- Based on hololeap's build-random-haskell-pkgs.bash
 module Main where
 
-import           Control.Concurrent.MVar            (MVar, newEmptyMVar,
-                                                     putMVar, tryTakeMVar)
 import           Control.Monad                      (void)
 import           Control.Monad.State                (MonadState, state)
+import           CoreMain                           (runMain)
 import qualified Data.ByteString.Char8              as B (pack)
-import           Data.Maybe                         (isNothing)
-import           Effectful                          (Eff, IOE, liftIO, runEff,
-                                                     (:>))
+import           Effectful                          (Eff, IOE, runEff, (:>))
 import           Effectful.Console.ByteString       (Console, runConsole)
 import qualified Effectful.Console.ByteString       as EC (putStrLn)
 import           Effectful.FileSystem               (FileSystem, runFileSystem)
-import qualified Effectful.FileSystem.IO            as IO (stderr, stdout)
+import qualified Effectful.FileSystem.IO            as IO (stderr)
 import qualified Effectful.FileSystem.IO.ByteString as EF (hPutStrLn, writeFile)
 import           Effectful.Process                  (Process, runProcess)
 import qualified Effectful.Process                  as EP (readProcessWithExitCode)
 import           Effectful.State.Static.Shared      (State, evalState)
 import qualified Effectful.State.Static.Shared      as ES (state)
 import           GHRB.Core                          (MonadGHRB,
-                                                     Running (Running), St,
-                                                     buildEmptyState, logOutput,
+                                                     St,
+                                                     bStderr, 
+                                                     logOutput,
                                                      readProcessWithExitCode,
-                                                     stderr, stdout)
-import           GHRB.IO                            (randomBuild, terminate)
-import           System.IO                          (BufferMode (NoBuffering),
-                                                     hSetBuffering)
-import           System.Posix.Signals               (Handler (Catch), addSignal,
-                                                     emptySignalSet,
-                                                     installHandler, sigINT,
-                                                     sigKILL, sigTERM)
-import           System.Random                      (newStdGen)
+                                                     stdout)
 
 instance ( IOE :> es
          , Console :> es
@@ -56,38 +47,24 @@ instance ( IOE :> es
          MonadGHRB (Eff es) where
   readProcessWithExitCode = EP.readProcessWithExitCode
   stdout = EC.putStrLn
-  stderr = EF.hPutStrLn IO.stderr . B.pack
+  bStderr = EF.hPutStrLn IO.stderr
   logOutput filepath = EF.writeFile filepath . B.pack
 
 instance (MonadState a (Eff es), State a :> es) => MonadState a (Eff es) where
   state = ES.state
 
-builder ::
-     (IOE :> es, Process :> es, FileSystem :> es, State St :> es, Console :> es)
-  => MVar ()
-  -> Eff es ()
-builder interrupt = do
-  interrupted <- liftIO $ tryTakeMVar interrupt
-  running <- randomBuild
-  if isNothing interrupted && running == Running
-    then randomBuild >> builder interrupt
-    else (stdout . B.pack $ "Hello World")
-           >> terminate (Just . B.pack $ "interrupted")
-           >> pure ()
-
-main :: IO ()
-main = do
-  interrupt <- newEmptyMVar
-  initialState <- buildEmptyState <$> liftIO newStdGen
-  hSetBuffering IO.stdout NoBuffering
-  hSetBuffering IO.stderr NoBuffering
-  void . installHandler sigINT (Catch $ putMVar interrupt ())
-    $ Just . addSignal sigKILL . addSignal sigTERM
-    $ emptySignalSet
+runGHRB ::
+     St
+  -> Eff ([State St, Process, Console, FileSystem, IOE])
+       ()
+  -> IO ()
+runGHRB initialState =
   void
     . runEff
     . runFileSystem
     . runConsole
     . runProcess
     . evalState initialState
-    $ builder interrupt
+
+main :: IO ()
+main = runMain runGHRB

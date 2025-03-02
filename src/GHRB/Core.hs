@@ -42,31 +42,34 @@ module GHRB.Core
   , stdout
   , readProcessWithExitCode
   , stderr
+  , bStderr
   , logOutput
   ) where
 
-import           Control.Applicative    (many, optional, (<|>))
-import           Control.Monad          (void)
-import           Control.Monad.IO.Class (MonadIO)
-import           Control.Monad.State    (MonadState)
-import           Data.ByteString        (ByteString)
-import qualified Data.ByteString.Char8  as B (pack)
-import           Data.HashMap.Strict    (HashMap, alter, elems, keys, (!))
-import qualified Data.HashMap.Strict    as Map (differenceWith, size, toList)
-import           Data.HashSet           (HashSet)
-import qualified Data.HashSet           as Set (difference, foldr, insert, null,
-                                                singleton, size, toList, unions)
-import           Data.Text              (Text)
-import qualified Data.Text              as T (append, cons, pack, unpack)
-import           Data.Time.Clock.System (SystemTime, systemToUTCTime)
-import           Data.Time.Format       (defaultTimeLocale, formatTime)
-import           Data.Void              (Void)
-import           FlatParse.Basic        (Parser, Result (OK), char, eof,
-                                         runParser, satisfy, string)
-import           System.Exit            (ExitCode)
-import           System.Random          (StdGen, randomR)
+import           Control.Applicative     (many, optional, (<|>))
+import           Control.Monad           (void)
+import           Control.Monad.IO.Class  (MonadIO)
+import           Control.Monad.State     (MonadState)
+import           Data.ByteString         (ByteString)
+import qualified Data.ByteString.Char8   as B (pack, unpack)
+import           Data.HashMap.Strict     (HashMap, alter, elems, keys, (!))
+import qualified Data.HashMap.Strict     as Map (differenceWith, size, toList)
+import           Data.HashSet            (HashSet)
+import qualified Data.HashSet            as Set (difference, foldr, insert,
+                                                 null, singleton, size, toList,
+                                                 unions)
+import           Data.Text               (Text)
+import qualified Data.Text               as T (append, cons, pack, unpack)
+import           Data.Time.Clock.System  (SystemTime, systemToUTCTime)
+import           Data.Time.Format        (defaultTimeLocale, formatTime)
+import           Data.Void               (Void)
+import           FlatParse.Basic         (Parser, Result (OK), char, eof,
+                                          runParser, satisfy, string)
+import           System.Exit             (ExitCode)
+import           System.Random           (StdGen, randomR)
 
--- | A monad class to output messages
+-- | A monad class to output messages. Minimum complete definition stdout,
+-- readProcessWithExitCode, bStdErr || stderr, logOutput
 class (Monad m, MonadIO m, MonadState St m) =>
       MonadGHRB m
   where
@@ -74,6 +77,9 @@ class (Monad m, MonadIO m, MonadState St m) =>
   readProcessWithExitCode ::
        FilePath -> [String] -> String -> m (ExitCode, String, String)
   stderr :: String -> m ()
+  stderr = bStderr . B.pack
+  bStderr :: ByteString -> m ()
+  bStderr = stderr . B.unpack
   logOutput :: FilePath -> String -> m ()
 
 type Package = (Text, Text)
@@ -127,7 +133,10 @@ instance Show St where
       sd = Set.size . Set.unions . elems . downgrade $ st
       sur = Set.size . Set.unions . elems . unresolved $ st
       sun = Set.size . Set.unions . elems . untried $ st
-      sr = if sc + sf + sd + sur == 0 then 0 else (sc * 100) `div` (sc + sf + sd + sur)
+      sr =
+        if sc + sf + sd + sur == 0
+          then 0
+          else (sc * 100) `div` (sc + sf + sd + sur)
 
 buildEmptyState :: StdGen -> St
 buildEmptyState = St mempty mempty mempty mempty mempty mempty undefined
@@ -222,7 +231,8 @@ hasFailed (category, name) st =
   st {failed = alter (insertIf name) category . failed $ st}
 
 addTried :: Package -> St -> St
-addTried (category, name) st = st {tried = alter (insertIf name) category . tried $ st}
+addTried (category, name) st =
+  st {tried = alter (insertIf name) category . tried $ st}
 
 insertIf :: Text -> Maybe (HashSet Text) -> Maybe (HashSet Text)
 insertIf name Nothing    = Just (Set.singleton name)

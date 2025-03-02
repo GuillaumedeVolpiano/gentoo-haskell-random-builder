@@ -51,7 +51,7 @@ library
   hs-source-dirs:   src
   default-language: Haskell2010
 
-executable gentoo-haskell-random-builder
+executable ghrb
   import:           warnings
 
   if flag(mtl)
@@ -66,6 +66,7 @@ executable gentoo-haskell-random-builder
       , bytestring                     ^>=0.12.1.0
       , gentoo-haskell-random-builder
       , mtl                            ^>=2.3.1
+      , optparse-applicative ^>=0.18.1.0
       , process                        ^>=1.6.25.0
       , random                         ^>=1.2.1.0
       , unix                           ^>=2.8.6.0
@@ -73,6 +74,7 @@ executable gentoo-haskell-random-builder
   else
     build-depends:
       , base                           >=4.17.0.0
+      , optparse-applicative ^>=0.18.1.0
       , bytestring                     ^>=0.12.1.0
       , effectful                      ^>=2.5.1.0
       , effectful-core                 ^>=2.5.0
@@ -82,5 +84,6 @@ executable gentoo-haskell-random-builder
       , random                         ^>=1.2.1.0
       , unix                           ^>=2.8.6.0
 
+  other-modules: CoreMain
   hs-source-dirs:   app
   default-language: Haskell2010
