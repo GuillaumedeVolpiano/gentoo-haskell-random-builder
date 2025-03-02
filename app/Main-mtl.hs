@@ -23,19 +23,20 @@ import qualified Data.ByteString        as B (writeFile)
 import qualified Data.ByteString.Char8  as B (hPutStrLn, pack, putStrLn)
 import           GHRB.Core              (MonadGHRB, St, logOutput,
                                          readProcessWithExitCode, stderr,
-                                         stdout)
+                                         stdout, Args)
 import qualified System.IO              as IO (stderr)
 import qualified System.Process         as SP (readProcessWithExitCode)
+import Control.Monad.Reader (ReaderT, runReaderT)
 
-instance MonadGHRB (StateT St IO) where
+instance MonadGHRB (StateT St (ReaderT Args IO)) where
   readProcessWithExitCode fp args input =
     liftIO $ SP.readProcessWithExitCode fp args input
   stdout message = liftIO $ B.putStrLn message
   stderr message = liftIO $ B.hPutStrLn IO.stderr (B.pack message)
   logOutput filepath output = liftIO $ B.writeFile filepath (B.pack output)
 
-runGHRB :: St -> StateT St IO () -> IO ()
-runGHRB initialState builder = void . evalStateT builder $ initialState
+runGHRB :: St -> Args -> StateT St (ReaderT Args IO) () -> IO ()
+runGHRB initialState args builder = void . flip runReaderT args $ evalStateT builder initialState
 
 main :: IO ()
 main = runMain runGHRB

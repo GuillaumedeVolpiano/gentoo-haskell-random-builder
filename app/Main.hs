@@ -36,12 +36,16 @@ import           GHRB.Core                          (MonadGHRB,
                                                      bStderr, 
                                                      logOutput,
                                                      readProcessWithExitCode,
-                                                     stdout)
+                                                     stdout, Args)
+import Effectful.Reader.Static (Reader,runReader)
+import qualified Effectful.Reader.Static as ER (ask, local)
+import Control.Monad.Reader (MonadReader, ask, local)
 
 instance ( IOE :> es
          , Console :> es
          , Process :> es
          , FileSystem :> es
+         , MonadReader Args (Eff es)
          , MonadState St (Eff es)
          ) =>
          MonadGHRB (Eff es) where
@@ -53,18 +57,24 @@ instance ( IOE :> es
 instance (MonadState a (Eff es), State a :> es) => MonadState a (Eff es) where
   state = ES.state
 
+instance (MonadReader a (Eff es), Reader a :> es) => MonadReader a (Eff es) where
+  ask = ER.ask
+  local = ER.local
+
 runGHRB ::
      St
-  -> Eff ([State St, Process, Console, FileSystem, IOE])
+  -> Args
+  -> Eff [Reader Args, State St, Process, Console, FileSystem, IOE]
        ()
   -> IO ()
-runGHRB initialState =
+runGHRB initialState args =
   void
     . runEff
     . runFileSystem
     . runConsole
     . runProcess
     . evalState initialState
+    . runReader args
 
 main :: IO ()
 main = runMain runGHRB

@@ -19,6 +19,12 @@ module GHRB.Core
   , hasCompleted
   , hasFailed
   , addTried
+  , --Console arguments
+  Args(Args)
+  , getInterrupt
+  , getEix
+  , getEmerge
+  , getHU
   , -- Running state
     Running(Running, Terminated)
   , -- Package Map
@@ -67,10 +73,12 @@ import           FlatParse.Basic         (Parser, Result (OK), char, eof,
                                           runParser, satisfy, string)
 import           System.Exit             (ExitCode)
 import           System.Random           (StdGen, randomR)
+import Control.Concurrent.MVar (MVar)
+import Control.Monad.Reader (MonadReader)
 
 -- | A monad class to output messages. Minimum complete definition stdout,
 -- readProcessWithExitCode, bStdErr || stderr, logOutput
-class (Monad m, MonadIO m, MonadState St m) =>
+class (Monad m, MonadIO m, MonadState St m, MonadReader Args m) =>
       MonadGHRB m
   where
   stdout :: ByteString -> m ()
@@ -103,6 +111,8 @@ data St = St
   , package    :: Package
   , generator  :: StdGen
   } deriving (Eq)
+
+data Args = Args { getInterrupt :: MVar (), getEix :: String, getEmerge :: String, getHU :: String }
 
 instance Show St where
   show st =
@@ -216,7 +226,7 @@ sizeMap = sum . map Set.size . elems
 
 failedResolve :: Package -> St -> St
 failedResolve (category, name) st =
-  st {failed = alter (insertIf name) category . failed $ st}
+  st {unresolved = alter (insertIf name) category . unresolved $ st}
 
 hasDowngraded :: Package -> St -> St
 hasDowngraded (category, name) st =

@@ -23,17 +23,10 @@ import           GHRB.Core              (MonadGHRB, Package, PackageMap,
                                          parsePackageList, prettyPackage,
                                          randomPackage, readProcessWithExitCode,
                                          sizeMap, stderr, stdout, toDate,
-                                         untried)
+                                         untried, getEix, getEmerge, getHU, getInterrupt)
 import           System.Exit            (ExitCode (ExitFailure, ExitSuccess))
-
-eix :: String
-eix = "/usr/bin/eix"
-
-emerge :: String
-emerge = "/usr/bin/emerge"
-
-haskellUpdater :: String
-haskellUpdater = "/usr/sbin/haskell-updater"
+import Control.Monad.Reader (asks)
+import Control.Concurrent.MVar (tryTakeMVar)
 
 tmpLogRoot :: String
 tmpLogRoot = "/tmp/random-pkg-"
@@ -75,6 +68,7 @@ notInstalledArgs =
 
 runEix :: MonadGHRB m => [String] -> m (ExitCode, Maybe PackageMap, String)
 runEix args = do
+  eix <- asks getEix
   (exitCode, packageList, stdErr) <- readProcessWithExitCode eix args ""
   case exitCode of
     ExitSuccess -> pure (exitCode, parsePackageList packageList, stdErr)
@@ -82,13 +76,13 @@ runEix args = do
 
 runEmerge :: MonadGHRB m => [String] -> Package -> m (ExitCode, String, String)
 runEmerge args pkg =
-  readProcessWithExitCode
+  asks getEmerge >>= \emerge -> readProcessWithExitCode
     emerge
     (mergeArgs ++ args ++ [T.unpack . prettyPackage $ pkg])
     ""
 
 runHaskellUpdater :: MonadGHRB m => m (ExitCode, String, String)
-runHaskellUpdater = readProcessWithExitCode haskellUpdater huArgs ""
+runHaskellUpdater = asks getHU >>= \haskellUpdater -> readProcessWithExitCode haskellUpdater huArgs ""
 
 currentUntried :: MonadGHRB m => m (Either Running PackageMap)
 currentUntried = do
@@ -207,6 +201,7 @@ terminate message = do
 
 capturePortageOutput :: MonadGHRB m => Package -> m (ExitCode, String)
 capturePortageOutput pkg = do
+  emerge <- asks getEmerge
   stderr (emerge ++ " " ++ unwords mergeArgs ++ " " ++ "--pretend --nospinner")
   (exitCode, stdOut, stdErr) <- runEmerge ["--pretend", "--nospinner"] pkg
   let output = stdOut ++ stdErr
@@ -226,6 +221,14 @@ checkForDowngrades portageOutput = do
         else stderr "No downgrade detected" >> pure downgraded
     _ -> error "generic parser error"
 
+checkInterrupt :: MonadGHRB m => m Running -> m Running
+checkInterrupt f = do
+  interrupt <- asks getInterrupt
+  interrupted <- liftIO $ tryTakeMVar interrupt
+  case interrupted of
+    Nothing -> f
+    _ -> terminate Nothing
+
 randomBuild :: MonadGHRB m => m Running
 randomBuild = do
   stderr
@@ -235,10 +238,10 @@ randomBuild = do
     Left r -> pure r
     Right untried' -> do
       modify . getUntried $ untried'
-      eitherPkg <- selectFrom
-      case eitherPkg of
-        Left r -> pure r
-        Right pkg -> do
-          modify (\st -> st {package = pkg})
-          modify (addTried pkg)
-          tryInstall
+      checkInterrupt $ do eitherPkg <- selectFrom
+                          case eitherPkg of
+                              Left r -> pure r
+                              Right pkg -> do
+                                  modify (\st -> st {package = pkg})
+                                  modify (addTried pkg)
+                                  checkInterrupt tryInstall
