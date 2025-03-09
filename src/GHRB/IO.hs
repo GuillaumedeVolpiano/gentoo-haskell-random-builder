@@ -1,150 +1,133 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeOperators    #-}
 
 module GHRB.IO
   ( randomBuild
   , terminate
+  , allPackages
+  , currentUntried
   ) where
 
-import           Control.Monad.IO.Class  (liftIO)
-import           Control.Monad.Reader    (asks)
-import           Control.Monad.State     (get, gets, modify)
-import           Data.ByteString         (ByteString)
-import qualified Data.ByteString.Char8   as B (pack)
-import           Data.Foldable           (traverse_)
-import           Data.Maybe              (fromJust, isJust)
-import qualified Data.Text               as T (unpack)
-import           Data.Time.Clock.System  (SystemTime, getSystemTime)
-import           FlatParse.Basic         (Result (OK))
-import           GHRB.Core               (MonadGHRB,
-                                          Output (DevNull, OutFile, Std),
-                                          Package, PackageMap,
-                                          Running (Running, Terminated),
-                                          addTried, failedResolve,
-                                          filePathPackage, generator, getEix,
-                                          getEmerge, getErrMode, getHU,
-                                          getOutputMode, getUntried,
-                                          hasCompleted, hasDowngraded,
-                                          hasFailed, package, parseDowngrades,
-                                          parsePackageList, prettyPackage,
-                                          randomPackage,
-                                          readProcessWithExitCode, sizeMap,
-                                          toDate, untried)
-import qualified GHRB.Core               as GC (appendFile, hPutStrLn,
-                                                writeFile)
-import           System.Exit             (ExitCode (ExitFailure, ExitSuccess))
-import qualified System.IO               as IO (stderr, stdout)
-
-stdout :: MonadGHRB m => ByteString -> m ()
-stdout message = do
-  outmode <- asks getOutputMode
-  case outmode of
-    Std        -> GC.hPutStrLn IO.stdout message
-    OutFile fp -> GC.appendFile fp message
-    DevNull    -> pure ()
-
-bStderr :: MonadGHRB m => ByteString -> m ()
-bStderr message = do
-  errmode <- asks getErrMode
-  case errmode of
-    DevNull      -> pure ()
-    Std          -> GC.hPutStrLn IO.stderr message
-    (OutFile fp) -> GC.appendFile fp message
-
-logOutput :: MonadGHRB m => FilePath -> String -> m ()
-logOutput filepath = GC.writeFile filepath . B.pack
-
-stderr :: MonadGHRB m => String -> m ()
-stderr = bStderr . B.pack
+import qualified Data.ByteString.Char8         as BS (pack)
+import qualified Data.ByteString.Lazy          as BL (ByteString)
+import qualified Data.ByteString.Lazy.Char8    as BL (pack)
+import qualified Data.HashSet                  as Set (difference, intersection,
+                                                       size)
+import           Data.List                     (uncons)
+import qualified Data.Text                     as T (unpack)
+import           Data.Time.Clock               (UTCTime)
+import           Distribution.Portage.Types    (Package)
+import           Effectful                     (Eff, IOE, (:>))
+import           Effectful.FileSystem          (FileSystem)
+import           Effectful.Process             (Process,
+                                                readProcessWithExitCode)
+import           Effectful.Reader.Static       (Reader, asks)
+import           Effectful.State.Static.Shared (State, get, gets, modify)
+import           Effectful.Time                (Time, currentTime)
+import           FlatParse.Basic               (Result (OK))
+import           GHRB.Core                     (addTried, failedResolve,
+                                                filePathPackage, hasCompleted,
+                                                hasDowngraded, hasFailed,
+                                                parseDowngrades,
+                                                parsePackageList, prettyPackage,
+                                                toDate, updateInstalled)
+import           GHRB.Core.Types               (Args,
+                                                EmergeResult (BuildFailed, EmergeSuccess),
+                                                PackageSet,
+                                                PrelimEmergeResult (PrelimEmergeSuccess, ResolveFailed, TriedToDowngrade),
+                                                Running (Running, Terminated),
+                                                St, Stderr, Stdout,
+                                                getAllPackages, getEmerge,
+                                                getHU, getPquery, installed,
+                                                package, untried)
+import           GHRB.IO.Cmd                   (defaultEmergeArgs,
+                                                defaultHUArgs,
+                                                defaultPqueryArgs,
+                                                installedArgs, repo,
+                                                runTransparent)
+import           GHRB.IO.Utils                 (bStderr, logOutput, stderr,
+                                                stdout)
+import           System.Exit                   (ExitCode (ExitFailure, ExitSuccess))
 
 tmpLogRoot :: String
 tmpLogRoot = "/tmp/random-pkg-"
 
-mergeArgs :: [String]
-mergeArgs =
-  [ "--ignore-default-opts"
-  , "--verbose"
-  , "--quiet-build"
-  , "--deep"
-  , "--complete-graph"
-  , "--oneshot"
-  ]
-
--- | Arguments for haskellUpdater
-huArgs :: [String]
-huArgs = ["--", "--ignore-default-opts", "--quiet-build"]
-
-installedArgs :: [String]
-installedArgs =
-  ["--in-overlay", "haskell", "--and", "-I", "--and", "--non-masked", "-#"]
-
-installableArgs :: [String]
-installableArgs = ["--in-overlay", "haskell", "--and", "--non-masked", "-#"]
-
-notInstalledArgs :: [String]
-notInstalledArgs =
-  [ "--in-overlay"
-  , "haskell"
-  , "--and"
-  , "-("
-  , "-!"
-  , "-I"
-  , "-)"
-  , "--and"
-  , "--non-masked"
-  , "-#"
-  ]
-
-runEix :: MonadGHRB m => [String] -> m (ExitCode, Maybe PackageMap, String)
-runEix args = do
-  eix <- asks getEix
-  (exitCode, packageList, stdErr) <- readProcessWithExitCode eix args ""
+runPquery ::
+     (Process :> es, Reader Args :> es)
+  => [String]
+  -> Eff es (ExitCode, Maybe PackageSet, String)
+runPquery args = do
+  pquery <- asks getPquery
+  let args' = args ++ defaultPqueryArgs
+  (exitCode, packageList, stdErr) <- readProcessWithExitCode pquery args' ""
   case exitCode of
     ExitSuccess -> pure (exitCode, parsePackageList packageList, stdErr)
     _           -> pure (exitCode, Nothing, stdErr)
 
-runEmerge :: MonadGHRB m => [String] -> Package -> m (ExitCode, String, String)
+allPackages :: (Process :> es) => FilePath -> Eff es (Maybe PackageSet)
+allPackages pquery = do
+  let args = defaultPqueryArgs ++ ["--repo", repo]
+  (exitCode, packageList, _) <- readProcessWithExitCode pquery args ""
+  case exitCode of
+    ExitSuccess -> pure (parsePackageList packageList)
+    _           -> pure Nothing
+
+runEmerge ::
+     (Process :> es, Reader Args :> es)
+  => [String]
+  -> Package
+  -> Eff es (ExitCode, String, String)
 runEmerge args pkg =
   asks getEmerge >>= \emerge ->
     readProcessWithExitCode
       emerge
-      (mergeArgs ++ args ++ [T.unpack . prettyPackage $ pkg])
+      (defaultEmergeArgs ++ args ++ [T.unpack . prettyPackage $ pkg])
       ""
 
-runHaskellUpdater :: MonadGHRB m => m (ExitCode, String, String)
+runHaskellUpdater ::
+     (IOE :> es, FileSystem :> es, Process :> es, Reader Args :> es)
+  => Eff es (ExitCode, Stdout, Stderr)
 runHaskellUpdater =
-  asks getHU >>= \haskellUpdater ->
-    readProcessWithExitCode haskellUpdater huArgs ""
+  asks getHU >>= \haskellUpdater -> runTransparent haskellUpdater defaultHUArgs
 
-currentUntried :: MonadGHRB m => m (Either Running PackageMap)
+currentUntried ::
+     (FileSystem :> es, Reader Args :> es, Process :> es)
+  => Eff es (Either Running PackageSet)
 currentUntried = do
-  (exitCode, notInstalled, stdErr) <- runEix notInstalledArgs
+  ap <- asks getAllPackages
+  rawInstalled <- currentInstalled
+  case rawInstalled of
+    Left _          -> pure rawInstalled
+    Right inst -> pure . Right $ Set.difference ap inst
+
+currentInstalled ::
+     (Reader Args :> es, Process :> es, FileSystem :> es)
+  => Eff es (Either Running PackageSet)
+currentInstalled = do
+  (exitCode, inst, stdErr) <- runPquery installedArgs
   case exitCode of
     ExitSuccess ->
-      case notInstalled of
-        (Just packageMap) -> pure . Right $ packageMap
-        Nothing -> stderr "eix output parsing failed" >> pure (Left Terminated)
+      case inst of
+        (Just packageSet) -> pure . Right $ packageSet
+        Nothing ->
+          stderr "pquery output parsing failed" >> pure (Left Terminated)
     ExitFailure 127 ->
-      stderr "Received exit code 127 from eix. Is it installed"
+      stderr "Received exit code 127 from pquery. Is it installed"
         >> pure (Left Terminated)
     ExitFailure 1 -> pure (Left Terminated)
     ExitFailure ef ->
-      stderr ("eix exited with unsuccessful code " ++ show ef ++ "\n" ++ stdErr)
+      stderr
+        ("pquery exited with unsuccessful code " ++ show ef ++ "\n" ++ stdErr)
         >> pure (Left Terminated)
 
-selectFrom :: MonadGHRB m => m (Either Running Package)
-selectFrom = do
-  toTry <- gets untried
-  let sp = sizeMap toTry
-  case sp of
-    0 -> pure (Left Terminated)
-    _ -> do
-      stderr $ "Choosing from pool of " ++ show sp ++ " packages..."
-      g <- gets generator
-      let (pkg, g') = randomPackage g toTry
-      modify (\x -> x {generator = g'})
-      pure . Right $ pkg
-
-tryInstall :: MonadGHRB m => m Running
+tryInstall ::
+     ( FileSystem :> es
+     , Reader Args :> es
+     , Process :> es
+     , State St :> es
+     , Time :> es
+     )
+  => Eff es (PrelimEmergeResult, String)
 tryInstall = do
   pkg <- gets package
   stderr $ "Trying " ++ (T.unpack . prettyPackage $ pkg)
@@ -152,46 +135,73 @@ tryInstall = do
   (exitCode, output) <- capturePortageOutput pkg
   case exitCode of
     ExitSuccess -> processIfNotDowngrade output
-    _           -> resolveFailed output >> pure Running
+    _           -> currentTime >>= \time -> pure (ResolveFailed time, output)
 
-processIfNotDowngrade :: MonadGHRB m => String -> m Running
+processIfNotDowngrade ::
+     ( Reader Args :> es
+     , FileSystem :> es
+     , Process :> es
+     , State St :> es
+     , Time :> es
+     )
+  => String
+  -> Eff es (PrelimEmergeResult, String)
 processIfNotDowngrade output = do
   downgrade <- checkForDowngrades output
   if downgrade
-    then downgrades output >> pure Running
-    else install
+    then currentTime >>= \time -> pure (TriedToDowngrade time, output)
+    else pure (PrelimEmergeSuccess, output)
 
-install :: MonadGHRB m => m Running
+install ::
+     ( IOE :> es
+     , FileSystem :> es
+     , State St :> es
+     , Reader Args :> es
+     , Process :> es
+     , Time :> es
+     )
+  => Eff es (EmergeResult, Running)
 install = do
   pkg <- gets package
   (exitCode, _, _) <- runEmerge ["--keep-going=y"] pkg
-  if exitCode == ExitSuccess
-    then modify (hasCompleted pkg)
-    else modify (hasFailed pkg)
+  time <- currentTime
+  let result =
+        if exitCode == ExitSuccess
+          then EmergeSuccess time
+          else BuildFailed time
   (exitCode', _, _) <- runHaskellUpdater
   if exitCode' /= ExitSuccess
-    then pure Terminated
-    else pure Running
+    then pure (result, Terminated)
+    else pure (result, Running)
 
-resolveFailed :: MonadGHRB m => String -> m ()
-resolveFailed output = do
-  time <- liftIO getSystemTime
+failed ::
+     (State St :> es, Reader Args :> es, FileSystem :> es)
+  => String
+  -> PrelimEmergeResult
+  -> Eff es ()
+failed output result = do
   pkg <- gets package
-  logPortageOutput time "resolve-failed-" pkg output
-  stderr
-    $ "Failure while resolving with portage: "
-        ++ (T.unpack . prettyPackage $ pkg)
-  modify (failedResolve pkg)
-
-downgrades :: MonadGHRB m => String -> m ()
-downgrades output = do
-  time <- liftIO getSystemTime
-  pkg <- gets package
-  logPortageOutput time "downgrade-" pkg output
-  modify (hasDowngraded pkg)
+  let (prefix, time, message, op) =
+        case result of
+          ResolveFailed t ->
+            ( "resolve-failed-"
+            , t
+            , " failed while resolving with portage"
+            , failedResolve)
+          TriedToDowngrade t ->
+            ("downgrade-", t, " tried to downgrade", hasDowngraded)
+          _ -> undefined
+  logPortageOutput time prefix pkg output
+  stderr $ (T.unpack . prettyPackage $ pkg) ++ message
+  modify (op time pkg)
 
 logPortageOutput ::
-     MonadGHRB m => SystemTime -> String -> Package -> String -> m ()
+     (FileSystem :> es, Reader Args :> es)
+  => UTCTime
+  -> String
+  -> Package
+  -> String
+  -> Eff es ()
 logPortageOutput time pathCircumstances pkg output = do
   let fullPath = tmpLogRoot ++ pathCircumstances ++ filePathPackage pkg
   stderr $ "Saving output to " ++ fullPath
@@ -203,42 +213,53 @@ logPortageOutput time pathCircumstances pkg output = do
        ++ "\n"
        ++ output)
 
-totalStats :: MonadGHRB m => m (Maybe ByteString)
+totalStats ::
+     (State St :> es, Reader Args :> es, Process :> es) => Eff es BL.ByteString
 totalStats = do
-  (ec, installed, _) <- runEix installedArgs
-  (ec', total, _) <- runEix installableArgs
-  if ec == ExitSuccess && ec' == ExitSuccess && isJust installed && isJust total
-    then do
-      let is = sizeMap . fromJust $ installed
-          ts = sizeMap . fromJust $ total
-          pc = (100 * is) `div` ts
-      pure . Just . B.pack
-        $ show is
-            ++ " installed out of "
-            ++ show ts
-            ++ " total, "
-            ++ show pc
-            ++ "%."
-    else pure Nothing
+  inst <- gets installed
+  total <- asks getAllPackages
+  let is = Set.size . Set.intersection total $ inst
+      ts = Set.size total
+      pc = (100 * is) `div` ts
+  pure . BL.pack
+    $ show is
+        ++ " installed out of "
+        ++ show ts
+        ++ " total, "
+        ++ show pc
+        ++ "%."
 
-terminate :: MonadGHRB m => m ()
+terminate ::
+     (FileSystem :> es, Reader Args :> es, State St :> es, Process :> es)
+  => Eff es ()
 terminate = do
-  st <- get
-  stdout . B.pack $ show st
-  totalStats >>= mapM_ stdout
+  st <- get :: (State St :> es) => Eff es St
+  stdout . BL.pack $ show st
+  totalStats >>= stdout
 
-capturePortageOutput :: MonadGHRB m => Package -> m (ExitCode, String)
+capturePortageOutput ::
+     (FileSystem :> es, Reader Args :> es, Process :> es)
+  => Package
+  -> Eff es (ExitCode, String)
 capturePortageOutput pkg = do
   emerge <- asks getEmerge
-  stderr (emerge ++ " " ++ unwords mergeArgs ++ " " ++ "--pretend --nospinner")
+  stderr
+    (emerge
+       ++ " "
+       ++ unwords defaultEmergeArgs
+       ++ " "
+       ++ "--pretend --nospinner")
   (exitCode, stdOut, stdErr) <- runEmerge ["--pretend", "--nospinner"] pkg
   let output = stdOut ++ stdErr
   stderr ("pretend_return: " ++ output)
   pure (exitCode, output)
 
-checkForDowngrades :: MonadGHRB m => String -> m Bool
+checkForDowngrades ::
+     (FileSystem :> es, Reader Args :> es, State St :> es)
+  => String
+  -> Eff es Bool
 checkForDowngrades portageOutput = do
-  let result = parseDowngrades . B.pack $ portageOutput
+  let result = parseDowngrades . BS.pack $ portageOutput
   case result of
     OK downgraded _ ->
       if downgraded
@@ -249,21 +270,41 @@ checkForDowngrades portageOutput = do
         else stderr "No downgrade detected" >> pure downgraded
     _ -> error "generic parser error"
 
-randomBuild :: MonadGHRB m => m Running
+randomBuild ::
+     ( FileSystem :> es
+     , State St :> es
+     , Reader Args :> es
+     , Process :> es
+     , Time :> es
+     , IOE :> es
+     )
+  => Eff es Running
 randomBuild = do
-  stderr
-    "\n--------\n\nLooking for a random package from ::haskell that is not installed..."
-  u <- currentUntried
-  case u of
-    Left r -> pure r
-    Right untried' -> do
-      modify . getUntried $ untried'
-      eitherPkg <- selectFrom
-      case eitherPkg of
-        Left r -> pure r
-        Right pkg -> do
-          modify (\st -> st {package = pkg})
-          modify (addTried pkg)
-          r <- tryInstall
-          totalStats >>= traverse_ bStderr
-          pure r
+  u <- gets untried
+  case uncons u of
+    Nothing -> pure Terminated
+    Just (pkg, ps) -> do
+      modify (\st -> st {package = pkg})
+      modify (addTried pkg)
+      (preliminaryEmergeResult, preliminaryOutput) <- tryInstall
+      r <-
+        case preliminaryEmergeResult of
+          PrelimEmergeSuccess -> do
+            (emergeResult, running) <- install
+            case emergeResult of
+              BuildFailed t   -> modify (hasFailed t pkg)
+              EmergeSuccess t -> modify (hasCompleted t pkg)
+            pure running
+          _ -> failed preliminaryOutput preliminaryEmergeResult >> pure Running
+      if r == Running
+        then do
+          rawInstalled <- currentInstalled
+          case rawInstalled of
+            Left r' -> pure r'
+            Right inst ->
+              currentTime >>= \time ->
+                modify (updateInstalled time ps inst)
+                  >> totalStats
+                  >>= bStderr
+                  >> pure r
+        else pure r

@@ -2,37 +2,14 @@
 {-# LANGUAGE TemplateHaskell  #-}
 
 module GHRB.Core
-  ( -- The process state
-    St
-  , buildEmptyState
-  , completed
-  , failed
-  , downgrade
-  , tried
-  , unresolved
-  , untried
-  , package
-  , generator
+  ( -- St helpers
+    buildEmptyState
   , -- State loggers
     failedResolve
   , hasDowngraded
   , hasCompleted
   , hasFailed
   , addTried
-  , --Console arguments
-    Args(Args)
-  , getEix
-  , getEmerge
-  , getHU
-  , getOutputMode
-  , getErrMode
-  , -- OutputMode
-    Output(Std, DevNull, OutFile)
-  , -- Running state
-    Running(Running, Terminated)
-  , -- Package Map
-    PackageMap
-  , sizeMap
   , -- Package parser
     parsePackageList
   , parseDowngrades
@@ -42,152 +19,63 @@ module GHRB.Core
     toDate
   , prettyPackage
   , filePathPackage
-  , -- randomPackage generator
-    randomPackage
   , -- untried packages checker
     getUntried
-  , -- the GHRB Monad class
-    MonadGHRB
-  , readProcessWithExitCode
-  , GHRB.Core.appendFile
-  , hPutStrLn
-  , GHRB.Core.writeFile
+  , updateInstalled
   ) where
 
-import           Control.Applicative     (many, optional, (<|>))
-import           Control.Monad           (void)
-import           Control.Monad.IO.Class  (MonadIO)
-import           Control.Monad.Reader    (MonadReader)
-import           Control.Monad.State     (MonadState)
-import           Data.ByteString         (ByteString)
-import qualified Data.ByteString.Char8   as B (pack)
-import           Data.HashMap.Strict     (HashMap, alter, elems, keys, (!))
-import qualified Data.HashMap.Strict     as Map (differenceWith, size, toList)
-import           Data.HashSet            (HashSet)
-import qualified Data.HashSet            as Set (difference, foldr, insert,
-                                                 null, singleton, size, toList,
-                                                 unions)
-import           Data.Text               (Text)
-import qualified Data.Text               as T (append, cons, pack, unpack)
-import           Data.Time.Clock.System  (SystemTime, systemToUTCTime)
-import           Data.Time.Format        (defaultTimeLocale, formatTime)
-import           Data.Void               (Void)
-import           FlatParse.Basic         (Parser, Result (OK), char, eof,
-                                          runParser, satisfy, string)
-import           System.Exit             (ExitCode)
-import           System.Random           (StdGen, randomR)
-import System.IO (Handle)
+import           Control.Applicative        (many, optional, (<|>))
+import           Control.Monad              (void)
+import qualified Data.ByteString            as BS (ByteString)
+import qualified Data.ByteString.Char8      as BS (pack)
+import qualified Data.HashSet               as Set (insert, member)
+import           Data.List                  (partition)
+import           Data.Text                  (Text)
+import qualified Data.Text                  as T (append, cons, pack)
+import           Data.Time.Clock            (UTCTime)
+import           Data.Time.Format           (defaultTimeLocale, formatTime)
+import           Data.Void                  (Void)
+import           Distribution.Portage.Types (Category (Category),
+                                             Package (Package),
+                                             PkgName (PkgName), getCategory,
+                                             getPkgName, getRepository, getSlot,
+                                             getVersion, unwrapCategory,
+                                             unwrapPkgName)
+import           FlatParse.Basic            (Parser, Result (OK), char, eof,
+                                             runParser, satisfy, string)
+import           GHRB.Core.Types            (PackageSet, St (St), completed,
+                                             downgrade, failed, toHashable,
+                                             tried, unresolved, untried, installed)
 
--- | A monad class to output messages. Minimum complete definition stdout,
--- readProcessWithExitCode, bStdErr || stderr, logOutput
-class (Monad m, MonadIO m, MonadState St m, MonadReader Args m) =>
-      MonadGHRB m
-  where
-  readProcessWithExitCode ::
-       FilePath -> [String] -> String -> m (ExitCode, String, String)
-  hPutStrLn :: Handle -> ByteString -> m ()
-  appendFile :: FilePath -> ByteString -> m ()
-  writeFile :: FilePath -> ByteString -> m ()
+buildEmptyState :: St
+buildEmptyState = St mempty mempty mempty mempty mempty mempty mempty undefined
 
-type Package = (Text, Text)
-
-type PackageMap = HashMap Text (HashSet Text)
-
--- | An ADT to report whether the program should have terminated
-data Running
-  = Terminated
-  | Running
-  deriving (Eq)
-
--- | Our current build state
-data St = St
-  { completed  :: PackageMap
-  , failed     :: PackageMap
-  , downgrade  :: PackageMap
-  , unresolved :: PackageMap
-  , tried      :: PackageMap
-  , untried    :: PackageMap
-  , package    :: Package
-  , generator  :: StdGen
-  } deriving (Eq)
-
-data Args = Args
-  { 
-  getEix        :: String
-  , getEmerge     :: String
-  , getHU         :: String
-  , getOutputMode :: Output
-  , getErrMode    :: Output
-  }
-
-data Output
-  = Std
-  | DevNull
-  | OutFile String
-
-instance Show St where
-  show st =
-    "\n--------\n\nResults:\n\nCompleted:\n"
-      ++ prettyPrintMap (completed st)
-      ++ "\nFailed:\n"
-      ++ prettyPrintMap (failed st)
-      ++ "\nThese packages tried to downgrade:\n"
-      ++ prettyPrintMap (downgrade st)
-      ++ "\nThese packages failed to resolve:\n"
-      ++ prettyPrintMap (unresolved st)
-      ++ "\n\nStatistics:\n\nsuccess: "
-      ++ show sc
-      ++ "\nfailures: "
-      ++ show sf
-      ++ "\ndowngrades: "
-      ++ show sd
-      ++ "\nunresolved: "
-      ++ show sur
-      ++ "\nuntried: "
-      ++ show sun
-      ++ "\nsuccessrate: "
-      ++ show sr
-      ++ "%"
-    where
-      sc = Set.size . Set.unions . elems . completed $ st
-      sf = Set.size . Set.unions . elems . failed $ st
-      sd = Set.size . Set.unions . elems . downgrade $ st
-      sur = Set.size . Set.unions . elems . unresolved $ st
-      sun = Set.size . Set.unions . elems . untried $ st
-      sr =
-        if sc + sf + sd + sur == 0
-          then 0
-          else (sc * 100) `div` (sc + sf + sd + sur)
-
-buildEmptyState :: StdGen -> St
-buildEmptyState = St mempty mempty mempty mempty mempty mempty undefined
-
-prettyPrintMap :: PackageMap -> String
-prettyPrintMap = unlines . map (uncurry prettyPrintCategory) . Map.toList
-
-prettyPrintCategory :: Text -> HashSet Text -> String
-prettyPrintCategory category = unlines . Set.foldr prettyName []
-  where
-    prettyName name = (T.unpack (T.append category . T.cons '/' $ name) :)
-
-parsePackageList :: String -> Maybe PackageMap
+parsePackageList :: String -> Maybe PackageSet
 parsePackageList packageList =
-  case runParser parsePackages . B.pack $ packageList of
+  case runParser parsePackages . BS.pack $ packageList of
     OK packageSet _ -> Just packageSet
     _               -> Nothing
 
-parsePackages :: Parser Void PackageMap
+parsePackages :: Parser Void PackageSet
 parsePackages = parsePackage <|> (eof >> return mempty)
 
-parsePackage :: Parser Void PackageMap
+parsePackage :: Parser Void PackageSet
 parsePackage = do
-  category <- T.pack <$> many (satisfy (/= '/'))
+  category <- many (satisfy (/= '/'))
   $(char '/')
-  name <- T.pack <$> many (satisfy (/= '\n'))
+  name <- many (satisfy (/= '\n'))
   void . optional $ $(char '\n')
-  alter (categoryAlter name) category <$> parsePackages
+  Set.insert
+    Package
+      { getCategory = Category category
+      , getPkgName = PkgName name
+      , getVersion = Nothing
+      , getSlot = Nothing
+      , getRepository = Nothing
+      }
+    <$> parsePackages
 
-parseDowngrades :: ByteString -> Result Void Bool
+parseDowngrades :: BS.ByteString -> Result Void Bool
 parseDowngrades = runParser parseDowngradeByLine
 
 parseDowngradeByLine :: Parser Void Bool
@@ -201,60 +89,46 @@ parseDowngradeByLine =
     <|> (many (satisfy (/= '\n')) >> $(char '\n') >> parseDowngradeByLine)
     <|> (eof >> pure False)
 
-categoryAlter :: Text -> Maybe (HashSet Text) -> Maybe (HashSet Text)
-categoryAlter name Nothing = Just . Set.singleton $ name
-categoryAlter name s       = fmap (Set.insert name) s
-
-toDate :: SystemTime -> Text
-toDate = T.pack . formatTime defaultTimeLocale "%c" . systemToUTCTime
+toDate :: UTCTime -> Text
+toDate = T.pack . formatTime defaultTimeLocale "%c"
 
 prettyPackage :: Package -> Text
-prettyPackage (category, name) = T.append category . T.cons '/' $ name
+prettyPackage p =
+  T.append (T.pack . unwrapCategory . getCategory $ p) . T.cons '/'
+    $ T.pack (unwrapPkgName . getPkgName $ p)
 
 filePathPackage :: Package -> String
-filePathPackage (category, name) =
-  T.unpack category ++ '-' : T.unpack name ++ ".log"
+filePathPackage p =
+  (unwrapCategory . getCategory $ p)
+    ++ '-'
+    : (unwrapPkgName . getPkgName $ p)
+    ++ ".log"
 
-randomPackage :: StdGen -> PackageMap -> (Package, StdGen)
-randomPackage g packageMap = ((category, name), g'')
-  where
-    (index, g') = randomR (0, Map.size packageMap - 1) g
-    category = keys packageMap !! index
-    packageSet = packageMap ! category
-    (index', g'') = randomR (0, Set.size packageSet - 1) g'
-    name = Set.toList packageSet !! index'
-
-getUntried :: PackageMap -> St -> St
+getUntried :: [Package] -> St -> St
 getUntried packages st = st {untried = packages'}
   where
-    packages' = Map.differenceWith diffMaybe packages . tried $ st
-    diffMaybe from remove
-      | Set.null . Set.difference from $ remove = Nothing
-      | otherwise = Just . Set.difference from $ remove
+    packages' = filter (\p -> not (p `Set.member` tried st)) packages
 
-sizeMap :: PackageMap -> Int
-sizeMap = sum . map Set.size . elems
+failedResolve :: UTCTime -> Package -> St -> St
+failedResolve t p st =
+  st {unresolved = Set.insert (toHashable t, p) . unresolved $ st}
 
-failedResolve :: Package -> St -> St
-failedResolve (category, name) st =
-  st {unresolved = alter (insertIf name) category . unresolved $ st}
+hasDowngraded :: UTCTime -> Package -> St -> St
+hasDowngraded t p st =
+  st {downgrade = Set.insert (toHashable t, p) . downgrade $ st}
 
-hasDowngraded :: Package -> St -> St
-hasDowngraded (category, name) st =
-  st {downgrade = alter (insertIf name) category . downgrade $ st}
+hasCompleted :: UTCTime -> Package -> St -> St
+hasCompleted t p st =
+  st {completed = Set.insert (toHashable t, p) . completed $ st}
 
-hasCompleted :: Package -> St -> St
-hasCompleted (category, name) st =
-  st {completed = alter (insertIf name) category . completed $ st}
-
-hasFailed :: Package -> St -> St
-hasFailed (category, name) st =
-  st {failed = alter (insertIf name) category . failed $ st}
+hasFailed :: UTCTime -> Package -> St -> St
+hasFailed t p st = st {failed = Set.insert (toHashable t, p) . failed $ st}
 
 addTried :: Package -> St -> St
-addTried (category, name) st =
-  st {tried = alter (insertIf name) category . tried $ st}
+addTried p st = st {tried = Set.insert p . tried $ st}
 
-insertIf :: Text -> Maybe (HashSet Text) -> Maybe (HashSet Text)
-insertIf name Nothing    = Just (Set.singleton name)
-insertIf name (Just set) = Just (Set.insert name set)
+updateInstalled :: UTCTime -> [Package] -> PackageSet -> St -> St
+updateInstalled time ps inst st = st'
+  where
+    (comp, untried') = partition (`Set.member` inst) ps
+    st' = foldr (hasCompleted time) st {untried = untried', installed=inst} comp

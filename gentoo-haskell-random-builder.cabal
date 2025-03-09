@@ -24,24 +24,31 @@ extra-doc-files: CHANGELOG.md
 common warnings
   ghc-options: -Wall
 
-flag mtl
-  description: Build the mtl-only variant rather than the effectful one
-  default:     False 
-  manual:      True
-
 library
   import:            warnings
   exposed-modules:
     GHRB.Core
+    GHRB.Core.Types
     GHRB.IO
+    GHRB.IO.Cmd
+    GHRB.IO.Utils
 
   build-depends:
+    , ansi-terminal         ^>=1.1
+    , ansi-terminal-types   ^>=1.1
     , base                  >=4.17.0.0
     , bytestring            ^>=0.12.1.0
+    , conduit               ^>=1.3.6
+    , conduit-extra         ^>=1.3.7
+    , effectful             ^>=2.5.1.0
+    , effectful-core        ^>=2.5.0
     , flatparse             ^>=0.5.2.1
+    , hashable              ^>=1.4.7.0
+    , monad-time-effectful  ^>=1.0.0.0
     , mtl                   ^>=2.3.1
-    , process               ^>=1.6.25
-    , random                ^>=1.2.1.0
+    , optparse-applicative  ^>=0.18.1.0
+    , portage-hs            ^>=0.1.0.0
+    , process ^>=1.6.25.0
     , text                  ^>=2.1.1
     , time                  ^>=1.12
     , transformers          ^>=0.6.1.0
@@ -53,38 +60,19 @@ library
 
 executable ghrb
   import:           warnings
+  main-is:           Main.hs
+  build-depends:
+    , base                           >=4.17.0.0
+    , bytestring                     ^>=0.12.1.0
+    , effectful                      ^>=2.5.1.0
+    , effectful-core                 ^>=2.5.0
+    , gentoo-haskell-random-builder
+    , list-shuffle                   ^>=1.0.0.0
+    , monad-time-effectful           ^>=1.0.0.0
+    , mtl                            ^>=2.3.1
+    , optparse-applicative           ^>=0.18.1.0
+    , unix                           ^>=2.8.6.0
+    , unordered-containers           ^>=0.2.20
 
-  if flag(mtl)
-    main-is: Main-mtl.hs
-
-  else
-    main-is:  Main.hs
-
-  if flag(mtl)
-    build-depends:
-      , base                           >=4.17.0.0
-      , bytestring                     ^>=0.12.1.0
-      , gentoo-haskell-random-builder
-      , mtl                            ^>=2.3.1
-      , optparse-applicative           ^>=0.18.1.0
-      , process                        ^>=1.6.25.0
-      , random                         ^>=1.2.1.0
-      , safe-exceptions                ^>=0.1.7.4
-      , unix                           ^>=2.8.6.0
-
-  else
-    build-depends:
-      , base                           >=4.17.0.0
-      , bytestring                     ^>=0.12.1.0
-      , effectful                      ^>=2.5.1.0
-      , effectful-core                 ^>=2.5.0
-      , gentoo-haskell-random-builder
-      , mtl                            ^>=2.3.1
-      , optparse-applicative           ^>=0.18.1.0
-      , process                        ^>=1.6.25.0
-      , random                         ^>=1.2.1.0
-      , unix                           ^>=2.8.6.0
-
-  other-modules:    CoreMain
   hs-source-dirs:   app
   default-language: Haskell2010

@@ -4,18 +4,18 @@ module CoreMain
   ( runMain
   ) where
 
-import           Control.Applicative     (optional, (<**>), (<|>))
-import           Control.Monad           (when)
-import           Control.Monad.IO.Class  (liftIO)
-import           GHRB.Core               (Args (Args), MonadGHRB,
-                                          Output (DevNull, OutFile, Std),
-                                          Running (Running), St,
-                                          buildEmptyState)
-import           GHRB.IO                 (randomBuild)
-import           Options.Applicative     (Parser, execParser, flag', fullDesc,
-                                          help, helper, info, long, metavar,
-                                          progDesc, short, strOption, value)
-import           System.Random           (newStdGen)
+import           Control.Applicative    (optional, (<**>), (<|>))
+import           Control.Monad          (when)
+import           Control.Monad.IO.Class (liftIO)
+import           GHRB.Core              (buildEmptyState)
+import           GHRB.Core.Types        (Args (Args), MonadGHRB,
+                                         Output (DevNull, OutFile, Std),
+                                         Running (Running), St)
+import           GHRB.IO                (randomBuild)
+import           Options.Applicative    (Parser, execParser, flag', fullDesc,
+                                         help, helper, info, long, metavar,
+                                         progDesc, short, strOption, value)
+import           System.Random          (newStdGen)
 
 args :: Parser Args
 args =
