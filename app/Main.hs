@@ -17,62 +17,55 @@
 -- Based on hololeap's build-random-haskell-pkgs.bash
 module Main where
 
-import           Control.Monad.Reader               (MonadReader, ask, local)
-import           Control.Monad.State                (MonadState, state)
-import           CoreMain                           (runMain)
-import           Effectful                          (Eff, IOE, runEff, (:>))
-import           Effectful.Console.ByteString       (Console, runConsole)
-import           Effectful.Exception                (finally)
-import           Effectful.FileSystem               (FileSystem, runFileSystem)
-import qualified Effectful.FileSystem.IO.ByteString as EF (appendFile,
-                                                           hPutStrLn, writeFile)
-import           Effectful.Process                  (Process, runProcess)
-import qualified Effectful.Process                  as EP (readProcessWithExitCode)
-import           Effectful.Reader.Static            (Reader, runReader)
-import qualified Effectful.Reader.Static            as ER (ask, local)
-import           Effectful.State.Static.Shared      (State, evalState)
-import qualified Effectful.State.Static.Shared      as ES (state)
-import           GHRB.Core                          (Args, MonadGHRB, St,
-                                                     appendFile, hPutStrLn,
-                                                     readProcessWithExitCode,
-                                                     writeFile)
+import           Control.Monad                 (when)
+import           Control.Monad.IO.Class        (liftIO)
+import           Data.HashSet                  (toList)
+import           Effectful                     (Eff, IOE, runEff, (:>))
+import           Effectful.Environment         (runEnvironment)
+import           Effectful.Exception           (finally)
+import           Effectful.FileSystem          (FileSystem, runFileSystem)
+import           Effectful.Process             (Process, runProcess)
+import           Effectful.Reader.Static       (Reader, runReader)
+import           Effectful.State.Static.Shared (State, evalState)
+import           Effectful.Time                (Time, runTime)
+import           GHRB.Core                     (buildEmptyState)
+import           GHRB.Core.Types               (Args, Running (Running), St,
+                                                getAllPackages, getPquery,
+                                                untried)
+import           GHRB.IO                       (allPackages, currentUntried,
+                                                randomBuild, terminate)
+import           GHRB.IO.Utils                 (getArgs, stderr)
+import           List.Shuffle                  (shuffleIO)
 
-import           GHRB.IO                            (terminate)
-
-instance ( IOE :> es
-         , Console :> es
-         , Process :> es
-         , FileSystem :> es
-         , Reader Args :> es
-         , MonadReader Args (Eff es)
-         , MonadState St (Eff es)
-         ) =>
-         MonadGHRB (Eff es) where
-  readProcessWithExitCode = EP.readProcessWithExitCode
-  writeFile = EF.writeFile
-  appendFile = EF.appendFile
-  hPutStrLn = EF.hPutStrLn
-
-instance (MonadState a (Eff es), State a :> es) => MonadState a (Eff es) where
-  state = ES.state
-
-instance (MonadReader a (Eff es), Reader a :> es) => MonadReader a (Eff es) where
-  ask = ER.ask
-  local = ER.local
-
-runGHRB ::
-     St
-  -> Args
-  -> Eff '[ Reader Args, State St, Process, Console, FileSystem, IOE] ()
-  -> IO ()
-runGHRB initialState args builder =
-    runEff
-    . runFileSystem
-    . runConsole
-    . runProcess
-    . evalState initialState
-    . runReader args
-    $ finally builder terminate
+builder ::
+     ( FileSystem :> es
+     , Process :> es
+     , State St :> es
+     , Reader Args :> es
+     , Time :> es
+     , IOE :> es
+     )
+  => Eff es ()
+builder = do
+  running <- randomBuild
+  when (running == Running) (randomBuild >> builder)
 
 main :: IO ()
-main = runMain runGHRB
+main =
+  runEff . runEnvironment . runFileSystem $ do
+    let initialState = buildEmptyState
+    args <- getArgs
+    runProcess $ do
+      rawAp <- allPackages . getPquery $ args
+      case rawAp of
+        Nothing ->
+          runReader args $ stderr "Could not get list of all available packages"
+        Just ap ->
+          runReader (args {getAllPackages = ap}) $ do
+            rawNotInstalled <- currentUntried
+            case rawNotInstalled of
+              Left _ -> stderr "Could not get list of uninstalled packages"
+              Right set -> do
+                untried' <- liftIO . shuffleIO . toList $ set
+                let state = initialState {untried = untried'}
+                runTime . evalState state $ finally builder terminate
