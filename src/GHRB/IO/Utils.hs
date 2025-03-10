@@ -1,6 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase       #-}
-{-# LANGUAGE TypeOperators    #-}
 
 module GHRB.IO.Utils
   ( printColor
@@ -11,71 +10,61 @@ module GHRB.IO.Utils
   , getArgs
   ) where
 
-import           Control.Applicative                     ((<**>))
-import           Control.Monad                           (void)
-import           Control.Monad.IO.Class                  (liftIO)
-import qualified Data.ByteString.Char8                   as BS (pack)
-import qualified Data.ByteString.Lazy                    as BL (ByteString)
-import qualified Data.ByteString.Lazy.Char8              as BL (pack)
-import           Effectful                               (Eff, IOE, (:>))
-import           Effectful.Environment                   (Environment, setEnv)
-import           Effectful.FileSystem                    (FileSystem,
-                                                          findExecutable)
-import           Effectful.FileSystem.IO                 (Handle)
-import qualified Effectful.FileSystem.IO                 as IO (stderr, stdout)
-import qualified Effectful.FileSystem.IO.ByteString      as BS (hPutStrLn)
-import qualified Effectful.FileSystem.IO.ByteString.Lazy as BL (appendFile,
-                                                                hPutStrLn,
-                                                                writeFile)
-import           Effectful.Reader.Static                 (Reader, asks)
-import           GHRB.Core.Types                         (Args, EmergePath,
-                                                          HaskellUpdaterPath,
-                                                          Output (DevNull, OutFile, Std),
-                                                          PqueryPath, args,
-                                                          getEmerge, getErrMode,
-                                                          getHU, getOutputMode,
-                                                          getPquery)
-import           Options.Applicative                     (execParser, fullDesc,
-                                                          helper, info,
-                                                          progDesc)
-import           System.Console.ANSI                     (setSGR)
-import           System.Console.ANSI.Types               (Color,
-                                                          ColorIntensity (Dull),
-                                                          ConsoleLayer (Foreground),
-                                                          SGR (Reset, SetColor))
-import           System.Exit                             (die)
+import           Control.Applicative        ((<**>))
+import           Control.Monad.IO.Class     (MonadIO, liftIO)
+import           Control.Monad.Reader       (MonadReader, asks)
+import qualified Data.ByteString.Char8      as BS (hPutStrLn, pack)
+import qualified Data.ByteString.Lazy       as BL (ByteString, appendFile,
+                                                   writeFile)
+import qualified Data.ByteString.Lazy.Char8 as BL (hPutStrLn, pack)
+import           GHRB.Core.Types            (Args, EmergePath,
+                                             HaskellUpdaterPath,
+                                             Output (DevNull, OutFile, Std),
+                                             PqueryPath, args, getEmerge,
+                                             getErrMode, getHU, getOutputMode,
+                                             getPquery)
+import           Options.Applicative        (execParser, fullDesc, helper, info,
+                                             progDesc)
+import           System.Console.ANSI        (setSGR)
+import           System.Console.ANSI.Types  (Color, ColorIntensity (Dull),
+                                             ConsoleLayer (Foreground),
+                                             SGR (Reset, SetColor))
+import           System.Directory           (findExecutable)
+import           System.Environment         (setEnv)
+import           System.Exit                (die)
+import qualified System.IO                  as IO (stderr, stdout)
+import           System.IO                  (Handle)
 
-printColor ::
-     (IOE :> es, FileSystem :> es) => Handle -> Color -> String -> Eff es ()
+printColor :: MonadIO m => Handle -> Color -> String -> m ()
 printColor h color message = do
-  void . liftIO $ setSGR [SetColor Foreground Dull color]
-  void . BS.hPutStrLn h . BS.pack $ message
-  void . liftIO $ setSGR [Reset]
-  BS.hPutStrLn h . BS.pack $ ""
+  liftIO $ setSGR [SetColor Foreground Dull color]
+  liftIO . BS.hPutStrLn h . BS.pack $ message
+  liftIO $ setSGR [Reset]
+  liftIO . BS.hPutStrLn h . BS.pack $ ""
 
-stdout :: (FileSystem :> es, Reader Args :> es) => BL.ByteString -> Eff es ()
+stdout :: (MonadIO m, MonadReader Args m) => BL.ByteString -> m ()
 stdout message = do
   outmode <- asks getOutputMode
   case outmode of
-    Std        -> BL.hPutStrLn IO.stdout message
-    OutFile fp -> BL.appendFile fp message
+    Std        -> liftIO $ BL.hPutStrLn IO.stdout message
+    OutFile fp -> liftIO $ BL.appendFile fp message
     DevNull    -> pure ()
 
-logOutput :: (FileSystem :> es) => FilePath -> String -> Eff es ()
-logOutput filepath = BL.writeFile filepath . BL.pack
+logOutput :: MonadIO m => FilePath -> String -> m ()
+logOutput filepath message = liftIO $ BL.writeFile filepath . BL.pack $ message
 
-stderr :: (FileSystem :> es, Reader Args :> es) => String -> Eff es ()
+stderr :: (MonadIO m, MonadReader Args m) => String -> m ()
 stderr = bStderr . BL.pack
 
-bStderr :: (FileSystem :> es, Reader Args :> es) => BL.ByteString -> Eff es ()
+bStderr :: (MonadIO m, MonadReader Args m) => BL.ByteString -> m ()
 bStderr message = do
   errmode <- asks getErrMode
   case errmode of
     DevNull      -> pure ()
-    Std          -> BL.hPutStrLn IO.stderr message
-    (OutFile fp) -> BL.appendFile fp message
+    Std          -> liftIO $ BL.hPutStrLn IO.stderr message
+    (OutFile fp) -> liftIO $ BL.appendFile fp message
 
-getArgs :: (IOE :> es, FileSystem :> es, Environment :> es) => Eff es Args
+getArgs :: MonadIO m => m Args
 getArgs = do
   args' <-
     liftIO
@@ -97,12 +86,11 @@ getArgs = do
       else pure . getHU $ args'
   pure args' {getPquery = pquery, getEmerge = emerge, getHU = hu}
 
-emergePath ::
-     (IOE :> es, FileSystem :> es, Environment :> es) => Eff es EmergePath
+emergePath :: MonadIO m => m EmergePath
 emergePath =
-  findExecutable "emerge" >>= \case
+  liftIO (findExecutable "emerge") >>= \case
     Just p -> do
-      void . setEnv "FEATURES" $ "-getbinpkg"
+      liftIO $ setEnv "FEATURES" "-getbinpkg"
       pure p
     Nothing ->
       liftIO
@@ -111,10 +99,9 @@ emergePath =
 
 -- | Find the path to the @pquery@ executable or throw an error. Caches the
 --   result in the case of a success.
-pqueryPath ::
-     (FileSystem :> es, Environment :> es, IOE :> es) => Eff es PqueryPath
+pqueryPath :: MonadIO m => m PqueryPath
 pqueryPath =
-  findExecutable "pquery" >>= \case
+  liftIO (findExecutable "pquery") >>= \case
     Just p -> pure p
     Nothing ->
       liftIO
@@ -124,13 +111,11 @@ pqueryPath =
 -- | Find the path to the @haskell-updater@ executable or throw an error.
 --   Caches the result in the case of a success. Sets
 --   @FEATURES="-getbinpkg"@ to avoid it interfering with this utility.
-haskellUpdaterPath ::
-     (FileSystem :> es, Environment :> es, IOE :> es)
-  => Eff es HaskellUpdaterPath
+haskellUpdaterPath :: MonadIO m => m HaskellUpdaterPath
 haskellUpdaterPath =
-  findExecutable "haskell-updater" >>= \case
+  liftIO (findExecutable "haskell-updater") >>= \case
     Just p -> do
-      setEnv "FEATURES" "-getbinpkg"
+      liftIO $ setEnv "FEATURES" "-getbinpkg"
       pure p
     Nothing ->
       liftIO

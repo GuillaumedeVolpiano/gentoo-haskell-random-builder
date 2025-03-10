@@ -2,7 +2,6 @@
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TypeOperators         #-}
 {-# LANGUAGE UndecidableInstances  #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
@@ -17,55 +16,43 @@
 -- Based on hololeap's build-random-haskell-pkgs.bash
 module Main where
 
-import           Control.Monad                 (when)
-import           Control.Monad.IO.Class        (liftIO)
-import           Data.HashSet                  (toList)
-import           Effectful                     (Eff, IOE, runEff, (:>))
-import           Effectful.Environment         (runEnvironment)
-import           Effectful.Exception           (finally)
-import           Effectful.FileSystem          (FileSystem, runFileSystem)
-import           Effectful.Process             (Process, runProcess)
-import           Effectful.Reader.Static       (Reader, runReader)
-import           Effectful.State.Static.Shared (State, evalState)
-import           Effectful.Time                (Time, runTime)
-import           GHRB.Core                     (buildEmptyState)
-import           GHRB.Core.Types               (Args, Running (Running), St,
-                                                getAllPackages, getPquery,
-                                                untried)
-import           GHRB.IO                       (allPackages, currentUntried,
-                                                randomBuild, terminate)
-import           GHRB.IO.Utils                 (getArgs, stderr)
-import           List.Shuffle                  (shuffleIO)
+import           Control.Exception.Safe (finally)
+import           Control.Monad          (when)
+import           Control.Monad.IO.Class (MonadIO, liftIO)
+import           Control.Monad.Reader   (MonadReader, runReaderT)
+import           Control.Monad.State    (MonadState, evalStateT)
+import           Control.Monad.Time     (MonadTime)
+import           Data.HashSet           (toList)
+import           GHRB.Core              (buildEmptyState)
+import           GHRB.Core.Types        (Args, Running (Running), St,
+                                         getAllPackages, getPquery, untried)
+import           GHRB.IO                (allPackages, currentUntried,
+                                         randomBuild, terminate)
+import           GHRB.IO.Utils          (getArgs, stderr)
+import           List.Shuffle           (shuffleIO)
 
 builder ::
-     ( FileSystem :> es
-     , Process :> es
-     , State St :> es
-     , Reader Args :> es
-     , Time :> es
-     , IOE :> es
-     )
-  => Eff es ()
+     (MonadIO m, MonadTime m, MonadState St m, MonadReader Args m, MonadTime m)
+  => m ()
 builder = do
   running <- randomBuild
   when (running == Running) (randomBuild >> builder)
 
 main :: IO ()
-main =
-  runEff . runEnvironment . runFileSystem $ do
-    let initialState = buildEmptyState
-    args <- getArgs
-    runProcess $ do
-      rawAp <- allPackages . getPquery $ args
-      case rawAp of
-        Nothing ->
-          runReader args $ stderr "Could not get list of all available packages"
-        Just ap ->
-          runReader (args {getAllPackages = ap}) $ do
-            rawNotInstalled <- currentUntried
-            case rawNotInstalled of
-              Left _ -> stderr "Could not get list of uninstalled packages"
-              Right set -> do
-                untried' <- liftIO . shuffleIO . toList $ set
-                let state = initialState {untried = untried'}
-                runTime . evalState state $ finally builder terminate
+main = do
+  let initialState = buildEmptyState
+  args <- getArgs
+  rawAp <- allPackages . getPquery $ args
+  case rawAp of
+    Nothing ->
+      flip runReaderT args
+        $ stderr "Could not get list of all available packages"
+    Just ap ->
+      flip runReaderT (args {getAllPackages = ap}) $ do
+        rawNotInstalled <- currentUntried
+        case rawNotInstalled of
+          Left _ -> stderr "Could not get list of uninstalled packages"
+          Right set -> do
+            untried' <- liftIO . shuffleIO . toList $ set
+            let state = initialState {untried = untried'}
+            flip evalStateT state $ finally builder terminate
