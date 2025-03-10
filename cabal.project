@@ -1,1 +1,3 @@
 packages: ./*.cabal
+program-options
+    ghc-options: -threaded
